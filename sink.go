@@ -6,9 +6,9 @@ type ChannelSink[E any] struct {
 	ch chan E
 }
 
-func NewChannelSink[E any]() *ChannelSink[E] {
+func NewChannelSink[E any](buf uint) *ChannelSink[E] {
 	return &ChannelSink[E]{
-		ch: make(chan E),
+		ch: make(chan E, int(buf)),
 	}
 }
 
