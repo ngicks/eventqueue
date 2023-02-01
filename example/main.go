@@ -1,12 +1,14 @@
-# eventqueue
+package main
 
-A generic FIFO event queue.
+import (
+	"context"
+	"fmt"
+	"sync"
 
-eventqueue queues up events (tasks) and send them to Sink in FIFO order.
+	"github.com/ngicks/eventqueue"
+)
 
-## Usage
-
-```go
+func main() {
 	sink := eventqueue.NewChannelSink[int]()
 	q := eventqueue.New[int](sink)
 
@@ -19,7 +21,7 @@ eventqueue queues up events (tasks) and send them to Sink in FIFO order.
 	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
 	go func() {
-        defer wg.Done()
+		defer wg.Done()
 		q.Run(ctx)
 	}()
 
@@ -36,4 +38,4 @@ eventqueue queues up events (tasks) and send them to Sink in FIFO order.
 
 	cancel()
 	wg.Wait()
-```
+}

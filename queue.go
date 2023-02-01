@@ -13,7 +13,11 @@ import (
 	"github.com/ngicks/gommon/pkg/common"
 )
 
+// Sink is written once EventQueue receives events.
+// Write is serialized in EventQueue. It can be goroutine-unsafe method.
 type Sink[E any] interface {
+	// Write writes the event object to Sink.
+	// If Write returns error, the event is put back to the queue.
 	Write(ctx context.Context, event E) error
 }
 
@@ -118,6 +122,10 @@ func (q *EventQueue[E]) Reserve(fn func() E) {
 	}()
 }
 
+// WaitReserved returns a channel which is sent every time reserved event enters into the queue.
+// The channel is closed once all reserved event,
+// which was present at the moment WaitReserved is called,
+// enter into the queue.
 func (q *EventQueue[E]) WaitReserved() <-chan struct{} {
 	q.cond.L.Lock()
 
@@ -148,6 +156,7 @@ func (q *EventQueue[E]) Len() (inQueue, reserved int) {
 	return q.queue.Len(), len(q.reserved)
 }
 
+// Drain blocks until queue and reserved events become 0.
 func (q *EventQueue[E]) Drain() {
 	q.cond.L.Lock()
 
@@ -160,7 +169,7 @@ func (q *EventQueue[E]) Drain() {
 	q.cond.L.Unlock()
 }
 
-// Run has no way to stop other than cancelling ctx.
+// Run runs q.
 func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 	q.cond.L.Lock()
 	if q.isRunning {
