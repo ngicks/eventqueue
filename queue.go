@@ -201,7 +201,7 @@ func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 	}
 	defer stopTimer()
 
-	writeAll := func(shouldResetTimer bool) {
+	writeAll := func() {
 		stopTimer()
 		for {
 			event, popped := q.pop()
@@ -216,18 +216,14 @@ func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 				q.queue.PushFront(event)
 				q.cond.L.Unlock()
 
-				if shouldResetTimer {
-					resetTimer()
-				}
+				resetTimer()
 				break
 			}
 		}
 		q.cond.Broadcast()
 	}
 
-	q.cond.L.Lock()
-	len := q.queue.Len()
-	q.cond.L.Unlock()
+	len, _ := q.Len()
 
 	if len > 0 {
 		select {
@@ -241,15 +237,13 @@ func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 		case <-ctx.Done():
 			stopTimer()
 
-			q.cond.L.Lock()
-			len := q.queue.Len()
-			q.cond.L.Unlock()
+			len, _ := q.Len()
 
 			return len, nil
 		case <-timer.C():
-			writeAll(true)
+			writeAll()
 		case <-q.hasUpdate:
-			writeAll(true)
+			writeAll()
 		}
 	}
 }
