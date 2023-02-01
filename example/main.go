@@ -9,7 +9,8 @@ import (
 )
 
 func main() {
-	sink := eventqueue.NewChannelSink[int]()
+	// unbuffered channel sink.
+	sink := eventqueue.NewChannelSink[int](0)
 	q := eventqueue.New[int](sink)
 
 	for i := 0; i < 10; i++ {
