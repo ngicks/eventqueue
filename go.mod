@@ -2,12 +2,11 @@ module github.com/ngicks/eventqueue
 
 go 1.19
 
-require github.com/ngicks/gommon/pkg/common v0.2.0
-
 require (
 	github.com/gammazero/deque v0.2.1
-	github.com/ngicks/gommon/pkg/timing v0.0.4
-	github.com/stretchr/testify v1.8.0
+	github.com/ngicks/mockable v0.0.0-20230524100816-106941ea893e
+	github.com/ngicks/timing-helper v0.0.0-20230822171135-9abb192ed0f9
+	github.com/stretchr/testify v1.8.3
 )
 
 require (

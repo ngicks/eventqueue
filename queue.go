@@ -10,7 +10,7 @@ import (
 	"log"
 
 	"github.com/gammazero/deque"
-	"github.com/ngicks/gommon/pkg/common"
+	"github.com/ngicks/mockable"
 )
 
 // Sink is written once EventQueue receives events.
@@ -42,7 +42,7 @@ type EventQueue[E any] struct {
 
 	cond         *sync.Cond
 	dur          time.Duration
-	timerFactory func() common.Timer
+	clockFactory func() mockable.Clock
 }
 
 func New[E any](sink Sink[E], opts ...Option[E]) *EventQueue[E] {
@@ -52,7 +52,7 @@ func New[E any](sink Sink[E], opts ...Option[E]) *EventQueue[E] {
 		queue:        deque.New[E](10),
 		hasUpdate:    make(chan struct{}, 1),
 		reserved:     make(map[int]<-chan struct{}, 10),
-		timerFactory: func() common.Timer { return common.NewTimerReal() },
+		clockFactory: func() mockable.Clock { return mockable.NewClockReal() },
 	}
 
 	for _, opt := range opts {
@@ -93,7 +93,7 @@ func (q *EventQueue[E]) Reserve(fn func() E) {
 	q.cond.L.Unlock()
 
 	go func() {
-		timer := q.timerFactory()
+		timer := q.clockFactory()
 
 		timer.Reset(time.Hour)
 		fnDone := make(chan struct{})
@@ -185,7 +185,7 @@ func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 		q.cond.L.Unlock()
 	}()
 
-	timer := q.timerFactory()
+	timer := q.clockFactory()
 	stopTimer := func() {
 		if !timer.Stop() {
 			select {

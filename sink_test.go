@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ngicks/gommon/pkg/timing"
+	timinghelper "github.com/ngicks/timing-helper"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -16,7 +16,7 @@ func TestChannelSink(t *testing.T) {
 	sink := NewChannelSink[int](0)
 
 	var err atomic.Pointer[error]
-	waiter := timing.CreateWaiterCh(func() {
+	waiter := timinghelper.CreateWaiterCh(func() {
 		err_ := sink.Write(context.Background(), 1)
 		err.Store(&err_)
 	})
@@ -33,7 +33,7 @@ func TestChannelSink(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	waiter = timing.CreateWaiterCh(func() {
+	waiter = timinghelper.CreateWaiterCh(func() {
 		err_ := sink.Write(ctx, 2)
 		err.Store(&err_)
 	})

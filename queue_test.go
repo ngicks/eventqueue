@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ngicks/gommon/pkg/common"
-	"github.com/ngicks/gommon/pkg/timing"
+	"github.com/ngicks/mockable"
+	timinghelper "github.com/ngicks/timing-helper"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -151,11 +151,11 @@ func TestEventQueue(t *testing.T) {
 func TestEventQueue_timer_is_reset_when_sink_returns_error(t *testing.T) {
 	assert := assert.New(t)
 
-	fakeTimer := common.NewTimerFake()
+	fakeClock := mockable.NewClockFake(time.Now())
 	sink := newSink()
 	eventQueue := New[int](sink, SetRetryInterval[int](25))
-	eventQueue.timerFactory = func() common.Timer {
-		return fakeTimer
+	eventQueue.clockFactory = func() mockable.Clock {
+		return fakeClock
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -177,7 +177,7 @@ func TestEventQueue_timer_is_reset_when_sink_returns_error(t *testing.T) {
 	sink.err = sampleErr
 	sink.mu.Unlock()
 
-	waiter := timing.CreateWaiterFn(func() { <-fakeTimer.ResetCh })
+	waiter := timinghelper.CreateWaiterFn(func() { <-fakeClock.ResetCh })
 	eventQueue.Push(213)
 	sink.blocker <- struct{}{}
 	sink.blocker <- struct{}{}
@@ -187,8 +187,9 @@ func TestEventQueue_timer_is_reset_when_sink_returns_error(t *testing.T) {
 	assert.Equal(213, sink.addedE[0], "Write of Sink must be called with Push-ed value.")
 	sink.mu.Unlock()
 
-	waiter = timing.CreateWaiterFn(func() { <-fakeTimer.ResetCh })
-	fakeTimer.Channel <- time.Now()
+	waiter = timinghelper.CreateWaiterFn(func() { <-fakeClock.ResetCh })
+	fakeClock.Reset(time.Since(fakeClock.Now()))
+	fakeClock.Send()
 	sink.blocker <- struct{}{}
 	sink.blocker <- struct{}{}
 	waiter()
@@ -296,7 +297,7 @@ func TestEventQueue_cancelling_ctx(t *testing.T) {
 	assert.Equal(9, inQ) // 10 pushed. 1 popped at the moment sink.blocker is received (no race condition).
 	assert.Equal(1, reserved)
 
-	drainWaiter := timing.CreateWaiterCh(func() { eventQueue.Drain() })
+	drainWaiter := timinghelper.CreateWaiterCh(func() { eventQueue.Drain() })
 
 	select {
 	case <-drainWaiter:
@@ -342,7 +343,7 @@ func TestEventQueue_cancelling_ctx(t *testing.T) {
 	sink.ctxCb = nil
 
 	ctx, cancel = context.WithCancel(context.Background())
-	runWaiter := timing.CreateWaiterCh(func() { eventQueue.Run(ctx) })
+	runWaiter := timinghelper.CreateWaiterCh(func() { _, _ = eventQueue.Run(ctx) })
 
 	<-drainWaiter
 	cancel()
