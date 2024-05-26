@@ -3,10 +3,11 @@ github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSs
 github.com/gammazero/deque v0.2.1 h1:qSdsbG6pgp6nL7A0+K/B7s12mcCY/5l5SIUpMOl+dC0=
 github.com/gammazero/deque v0.2.1/go.mod h1:LFroj8x4cMYCukHJDbxFCkT+r9AndaJnFMuZDV34tuU=
 github.com/google/go-cmp v0.5.9 h1:O2Tfq5qg4qc4AmwVlvv0oLiVAGB7enBSJ2x2DqQFi38=
+github.com/google/go-cmp v0.5.9/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
+github.com/jonboulle/clockwork v0.4.0 h1:p4Cf1aMWXnXAUh8lVfewRBx1zaTSYKrKMF2g3ST4RZ4=
+github.com/jonboulle/clockwork v0.4.0/go.mod h1:xgRqUGwRcjKCO1vbZUEtSLrqKoPSsUpK7fnezOII0kc=
 github.com/ngicks/mockable v0.0.0-20230524100816-106941ea893e h1:vKxIyXvp2C3GsYgUe++ZuRGwsr8MsL0rnU/EpxF4hbQ=
 github.com/ngicks/mockable v0.0.0-20230524100816-106941ea893e/go.mod h1:Aci4L6FO17gH+hmgUl4JiUIM6MtdvI78PjAGo6Il+Rc=
-github.com/ngicks/timing-helper v0.0.0-20230822170925-46faedec5f2e h1:bdpu40x3OPx60ODczmXqLrzmOhZh6opC3CXsvKwlwiU=
-github.com/ngicks/timing-helper v0.0.0-20230822170925-46faedec5f2e/go.mod h1:y6eCroaOKCWRH+lIMW8XUNq0imKx5HR0BKj/fcWmHog=
 github.com/ngicks/timing-helper v0.0.0-20230822171135-9abb192ed0f9 h1:z23rgFxfIN+E0RivpVs3HiQGhR0uzV3e97uuO+NusaE=
 github.com/ngicks/timing-helper v0.0.0-20230822171135-9abb192ed0f9/go.mod h1:y6eCroaOKCWRH+lIMW8XUNq0imKx5HR0BKj/fcWmHog=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=

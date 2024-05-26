@@ -5,12 +5,16 @@ import (
 	"errors"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"log"
-
 	"github.com/gammazero/deque"
-	"github.com/ngicks/mockable"
+	"github.com/jonboulle/clockwork"
+)
+
+var (
+	ErrAlreadyRunning = errors.New("already running")
+	ErrClosed         = errors.New("closed")
 )
 
 // Sink is written once EventQueue receives events.
@@ -23,36 +27,41 @@ type Sink[E any] interface {
 
 type Option[E any] func(q *EventQueue[E])
 
-// SetRetryInterval returns Option that sets the retry interval to q.
+// WithRetryInterval returns Option that sets the retry interval to q.
 // Without this option, q does not retry to Write until another push event occurs.
-func SetRetryInterval[E any](dur time.Duration) Option[E] {
+func WithRetryInterval[E any](dur time.Duration) Option[E] {
 	return func(q *EventQueue[E]) {
 		q.dur = dur
 	}
+}
+
+type reservation struct {
+	done   <-chan struct{}
+	cancel context.CancelCauseFunc
 }
 
 type EventQueue[E any] struct {
 	queue *deque.Deque[E]
 	sink  Sink[E]
 
-	isRunning     bool
+	isRunning     atomic.Bool
 	hasUpdate     chan struct{}
-	reserved      map[int]<-chan struct{}
+	reserved      map[int]reservation
 	reservationId int
 
-	cond         *sync.Cond
-	dur          time.Duration
-	clockFactory func() mockable.Clock
+	cond  *sync.Cond
+	dur   time.Duration
+	clock clockwork.Clock
 }
 
 func New[E any](sink Sink[E], opts ...Option[E]) *EventQueue[E] {
 	q := &EventQueue[E]{
-		cond:         sync.NewCond(&sync.Mutex{}),
-		sink:         sink,
-		queue:        deque.New[E](10),
-		hasUpdate:    make(chan struct{}, 1),
-		reserved:     make(map[int]<-chan struct{}, 10),
-		clockFactory: func() mockable.Clock { return mockable.NewClockReal() },
+		cond:      sync.NewCond(&sync.Mutex{}),
+		sink:      sink,
+		queue:     deque.New[E](1 << 4),
+		hasUpdate: make(chan struct{}, 1),
+		reserved:  make(map[int]reservation, 1<<4),
+		clock:     clockwork.NewRealClock(),
 	}
 
 	for _, opt := range opts {
@@ -63,9 +72,7 @@ func New[E any](sink Sink[E], opts ...Option[E]) *EventQueue[E] {
 }
 
 func (q *EventQueue[E]) IsRunning() bool {
-	q.cond.L.Lock()
-	defer q.cond.L.Unlock()
-	return q.isRunning
+	return q.isRunning.Load()
 }
 
 func (q *EventQueue[E]) Push(e E) {
@@ -73,6 +80,7 @@ func (q *EventQueue[E]) Push(e E) {
 	defer q.cond.L.Unlock()
 
 	q.queue.PushBack(e)
+	q.cond.Broadcast() // notify all change.
 
 	select {
 	case q.hasUpdate <- struct{}{}:
@@ -80,64 +88,70 @@ func (q *EventQueue[E]) Push(e E) {
 	}
 }
 
-// Reserve reserves update. fn will be called in a newly created goroutine.
-func (q *EventQueue[E]) Reserve(fn func() E) {
+// CancelReserved cancels all jobs reserved via Reserve.
+// CancelReserved only cancels all reservations present at the time CancelReserved is called.
+// q is still valid and usable after this method returns.
+func (q *EventQueue[E]) CancelReserved() {
+	q.cond.L.Lock()
+	defer q.cond.L.Unlock()
+	for _, reservation := range q.reserved {
+		reservation.cancel(ErrClosed)
+	}
+}
+
+// Reserve reserves an update which will occur after fn returns.
+//
+// fn will be called in a newly created goroutine,
+// and it must return E.
+// It also must respect ctx cancellation whose cause will be ErrClosed in case it has been cancelled.
+// Cancellation would only happen if CloseReserved was called.
+//
+// E returned by fn enters q only and only if it returned nil error.
+func (q *EventQueue[E]) Reserve(fn func(context.Context) (E, error)) {
 	doneCh := make(chan struct{})
+	ctx, cancel := context.WithCancelCause(context.Background())
 
 	q.cond.L.Lock()
 	id := q.reservationId
 	q.reservationId = rotatingAdd(q.reservationId)
 	// id could overwrite existing entry.
-	// It should not happen.
-	q.reserved[id] = doneCh
+	// Not likely but possible.
+	// TODO: detect overwrite and panic if any?
+	q.reserved[id] = reservation{doneCh, cancel}
+	q.cond.Broadcast() // notify all change of reserved
 	q.cond.L.Unlock()
 
 	go func() {
-		timer := q.clockFactory()
-
-		timer.Reset(time.Hour)
-		fnDone := make(chan struct{})
-		var e E
-		go func() {
-			<-fnDone
-			e = fn()
-			close(fnDone)
-		}()
-		fnDone <- struct{}{}
-
-		select {
-		case <-fnDone:
+		e, err := fn(ctx)
+		if err == nil {
 			q.Push(e)
-		case <-timer.C():
-			log.Println(
-				"[WARNING] github.com/ngicks/eventqueue: " +
-					"Reserve timed out. The input fn blocked over 1 hour.",
-			)
 		}
 		close(doneCh)
-
 		q.cond.L.Lock()
-		delete(q.reserved, id)
+		delete(q.reserved, id) // notify all change of reserved
+		q.cond.Broadcast()
 		q.cond.L.Unlock()
 	}()
 }
 
-// WaitReserved returns a channel which is sent every time reserved event enters into the queue.
-// The channel is closed once all reserved event,
+// WaitReserved returns a channel which receives
+// every time reserved event enters into the queue, or has been cancelled.
+//
+// The channel is closed once all reservation events,
 // which was present at the moment WaitReserved is called,
-// enter into the queue.
+// are done.
 func (q *EventQueue[E]) WaitReserved() <-chan struct{} {
 	q.cond.L.Lock()
 
 	eventCh := make(chan struct{})
-	wg := sync.WaitGroup{}
-	for _, doneCh := range q.reserved {
+	var wg sync.WaitGroup
+	for _, reservation := range q.reserved {
 		wg.Add(1)
 		go func(doneCh <-chan struct{}) {
+			defer wg.Done()
 			<-doneCh
 			eventCh <- struct{}{}
-			wg.Done()
-		}(doneCh)
+		}(reservation.done)
 	}
 
 	q.cond.L.Unlock()
@@ -150,7 +164,7 @@ func (q *EventQueue[E]) WaitReserved() <-chan struct{} {
 	return eventCh
 }
 
-func (q *EventQueue[E]) Len() (inQueue, reserved int) {
+func (q *EventQueue[E]) Len() (queued, reserved int) {
 	q.cond.L.Lock()
 	defer q.cond.L.Unlock()
 	return q.queue.Len(), len(q.reserved)
@@ -159,7 +173,6 @@ func (q *EventQueue[E]) Len() (inQueue, reserved int) {
 // Drain blocks until queue and reserved events become 0.
 func (q *EventQueue[E]) Drain() {
 	q.cond.L.Lock()
-
 	for {
 		if q.queue.Len() == 0 && len(q.reserved) == 0 {
 			break
@@ -169,36 +182,40 @@ func (q *EventQueue[E]) Drain() {
 	q.cond.L.Unlock()
 }
 
-// Run runs q.
+// Run runs q, block until ctx is cancelled.
 func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
-	q.cond.L.Lock()
-	if q.isRunning {
-		q.cond.L.Unlock()
-		return 0, errors.New("Run is called twice")
+	if !q.isRunning.CompareAndSwap(false, true) {
+		return 0, ErrAlreadyRunning
 	}
-	q.isRunning = true
-	q.cond.L.Unlock()
+	defer q.isRunning.Store(false)
 
-	defer func() {
-		q.cond.L.Lock()
-		q.isRunning = false
-		q.cond.L.Unlock()
-	}()
+	retryTimer := q.clock.NewTimer(30 * 24 * time.Hour) // far time.
+	_ = retryTimer.Stop()
 
-	timer := q.clockFactory()
+	var set bool
+	resetTimer := func() {}
+	if q.dur > 0 {
+		resetTimer = func() {
+			retryTimer.Reset(q.dur)
+			set = true
+		}
+	}
 	stopTimer := func() {
-		if !timer.Stop() {
-			select {
-			case <-timer.C():
-			default:
-			}
+		if !retryTimer.Stop() && set {
+			// This is too difficult to use correctly.
+			// It states
+			//
+			// > https://pkg.go.dev/time@go1.22.3#Timer.Stop
+			// > It returns true if the call stops the timer, false if the timer has already expired or been stopped.
+			//
+			// Without an external flag, we have no clue to know if it has been fired or simply not yet reset.
+			// Blocking on channel without doubts are too dangerous,
+			// which could cause blocking forever.
+			<-retryTimer.Chan()
 		}
+		set = false
 	}
-	resetTimer := func() {
-		if q.dur > 0 {
-			timer.Reset(q.dur)
-		}
-	}
+
 	defer stopTimer()
 
 	writeAll := func() {
@@ -210,7 +227,6 @@ func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 			}
 
 			err := q.sink.Write(ctx, event)
-
 			if err != nil {
 				q.cond.L.Lock()
 				q.queue.PushFront(event)
@@ -236,11 +252,10 @@ func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 		select {
 		case <-ctx.Done():
 			stopTimer()
-
 			len, _ := q.Len()
-
 			return len, nil
-		case <-timer.C():
+		case <-retryTimer.Chan():
+			set = false
 			writeAll()
 		case <-q.hasUpdate:
 			writeAll()

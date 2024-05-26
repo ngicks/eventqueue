@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ngicks/mockable"
+	"github.com/jonboulle/clockwork"
 	timinghelper "github.com/ngicks/timing-helper"
 	"github.com/stretchr/testify/assert"
 )
@@ -17,7 +17,7 @@ type sink struct {
 	err     error
 	flowing bool
 	blocker chan struct{} // blocker will be received twice per a Write call.
-	addedE  []int
+	written []int
 	ctxCb   func(context.Context)
 	mu      sync.Mutex
 }
@@ -25,7 +25,7 @@ type sink struct {
 func newSink() *sink {
 	return &sink{
 		blocker: make(chan struct{}),
-		addedE:  make([]int, 0),
+		written: make([]int, 0),
 	}
 }
 
@@ -36,7 +36,7 @@ func (s *sink) Write(ctx context.Context, e int) error {
 
 	s.mu.Lock()
 
-	s.addedE = append(s.addedE, e)
+	s.written = append(s.written, e)
 	err := s.err
 	cb := s.ctxCb
 	s.mu.Unlock()
@@ -83,27 +83,27 @@ func TestEventQueue(t *testing.T) {
 	}
 
 	sink.mu.Lock()
-	assert.Len(sink.addedE, 5)
-	for idx, e := range sink.addedE {
+	assert.Len(sink.written, 5)
+	for idx, e := range sink.written {
 		assert.Equal(idx, e, "sink must receive Push-ed events in FIFO order.")
 	}
-	sink.addedE = sink.addedE[:0] // reset
+	sink.written = sink.written[:0] // reset
 	sink.mu.Unlock()
 
 	blocker1 := make(chan struct{})
 	blocker2 := make(chan struct{})
 	blocker3 := make(chan struct{})
-	eventQueue.Reserve(func() int {
+	eventQueue.Reserve(func(_ context.Context) (int, error) {
 		<-blocker1
-		return 1
+		return 1, nil
 	})
-	eventQueue.Reserve(func() int {
+	eventQueue.Reserve(func(_ context.Context) (int, error) {
 		<-blocker2
-		return 2
+		return 2, nil
 	})
-	eventQueue.Reserve(func() int {
+	eventQueue.Reserve(func(_ context.Context) (int, error) {
 		<-blocker3
-		return 3
+		return 3, nil
 	})
 
 	waiter := eventQueue.WaitReserved()
@@ -136,12 +136,12 @@ func TestEventQueue(t *testing.T) {
 	)
 
 	sink.mu.Lock()
-	assert.Len(sink.addedE, 3)
-	assert.Equal(2, sink.addedE[0], "The Push order of reserved tasks are first unblocked to last.")
-	assert.Equal(3, sink.addedE[1], "The Push order of reserved tasks are first unblocked to last.")
-	assert.Equal(1, sink.addedE[2], "The Push order of reserved tasks are first unblocked to last.")
+	assert.Len(sink.written, 3)
+	assert.Equal(2, sink.written[0], "The Push order of reserved tasks are first unblocked to last.")
+	assert.Equal(3, sink.written[1], "The Push order of reserved tasks are first unblocked to last.")
+	assert.Equal(1, sink.written[2], "The Push order of reserved tasks are first unblocked to last.")
 
-	sink.addedE = sink.addedE[:0] // reset
+	sink.written = sink.written[:0] // reset
 	sink.mu.Unlock()
 
 	cancel()
@@ -151,12 +151,10 @@ func TestEventQueue(t *testing.T) {
 func TestEventQueue_timer_is_reset_when_sink_returns_error(t *testing.T) {
 	assert := assert.New(t)
 
-	fakeClock := mockable.NewClockFake(time.Now())
 	sink := newSink()
-	eventQueue := New[int](sink, SetRetryInterval[int](25))
-	eventQueue.clockFactory = func() mockable.Clock {
-		return fakeClock
-	}
+	eventQueue := New[int](sink, WithRetryInterval[int](25))
+	fakeClock := clockwork.NewFakeClock()
+	eventQueue.clock = fakeClock
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -177,26 +175,22 @@ func TestEventQueue_timer_is_reset_when_sink_returns_error(t *testing.T) {
 	sink.err = sampleErr
 	sink.mu.Unlock()
 
-	waiter := timinghelper.CreateWaiterFn(func() { <-fakeClock.ResetCh })
 	eventQueue.Push(213)
 	sink.blocker <- struct{}{}
 	sink.blocker <- struct{}{}
-	waiter()
 
 	sink.mu.Lock()
-	assert.Equal(213, sink.addedE[0], "Write of Sink must be called with Push-ed value.")
+	assert.Equal(213, sink.written[0], "Write of Sink must be called with Push-ed value.")
 	sink.mu.Unlock()
 
-	waiter = timinghelper.CreateWaiterFn(func() { <-fakeClock.ResetCh })
-	fakeClock.Reset(time.Since(fakeClock.Now()))
-	fakeClock.Send()
+	fakeClock.BlockUntil(1)
+	fakeClock.Advance(30)
 	sink.blocker <- struct{}{}
 	sink.blocker <- struct{}{}
-	waiter()
 
 	sink.mu.Lock()
 	assert.Equal(
-		213, sink.addedE[1],
+		213, sink.written[1],
 		"Write of Sink must be called again with "+
 			"the same value as the one it has received when it returned error",
 	)
@@ -215,7 +209,7 @@ func TestEventQueue_timer_is_reset_when_sink_returns_error(t *testing.T) {
 	assert.NoError(*err.Load())
 
 	sink.mu.Lock()
-	sink.addedE = sink.addedE[:0] // reset
+	sink.written = sink.written[:0] // reset
 	sink.err = nil
 	sink.mu.Unlock()
 
@@ -240,7 +234,7 @@ func TestEventQueue_timer_is_reset_when_sink_returns_error(t *testing.T) {
 	<-switchCh
 
 	sink.mu.Lock()
-	assert.Len(sink.addedE, 11)
+	assert.Len(sink.written, 11)
 	sink.mu.Unlock()
 }
 
@@ -248,7 +242,7 @@ func TestEventQueue_cancelling_ctx(t *testing.T) {
 	assert := assert.New(t)
 
 	sink := newSink()
-	eventQueue := New[int](sink, SetRetryInterval[int](25))
+	eventQueue := New[int](sink, WithRetryInterval[int](25))
 
 	eventQueue.Drain()
 
@@ -285,10 +279,10 @@ func TestEventQueue_cancelling_ctx(t *testing.T) {
 	called <- struct{}{}
 
 	blocking := make(chan struct{})
-	eventQueue.Reserve(func() int {
+	eventQueue.Reserve(func(ctx context.Context) (int, error) {
 		<-blocking
 		<-blocking
-		return 0
+		return 0, nil
 	})
 
 	blocking <- struct{}{}
@@ -329,7 +323,7 @@ func TestEventQueue_cancelling_ctx(t *testing.T) {
 	}
 
 	sink.mu.Lock()
-	assert.Len(sink.addedE, 10)
+	assert.Len(sink.written, 10)
 	sink.mu.Unlock()
 
 	inQ, reserved = eventQueue.Len()
