@@ -24,3 +24,9 @@ func (s *ChannelSink[E]) Write(ctx context.Context, event E) error {
 func (s *ChannelSink[E]) Outlet() <-chan E {
 	return s.ch
 }
+
+type DrainSink[E any] struct{}
+
+func (DrainSink[E]) Write(ctx context.Context, event E) error {
+	return nil
+}
