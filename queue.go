@@ -21,7 +21,9 @@ var (
 // Write is serialized in EventQueue. It can be goroutine-unsafe method.
 type Sink[E any] interface {
 	// Write writes the event object to Sink.
-	// If Write returns error, the event is put back to head of the queue.
+	// If Write returns error, the event is put back to head of the queue,
+	// which does not make q.Run return with that error,
+	// only suspends q until next Push or after retry timeout.
 	Write(ctx context.Context, event E) error
 }
 
