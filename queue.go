@@ -95,6 +95,42 @@ func (q *EventQueue[E]) Push(e E) {
 	}
 }
 
+// Range calls fn sequentially for each element in q. If fn returns false, range stops the iteration.
+func (q *EventQueue[E]) Range(fn func(i int, e E) (next bool)) {
+	q.cond.L.Lock()
+	defer q.cond.L.Unlock()
+	for i := 0; i < q.queue.Len(); i++ {
+		if !fn(i, q.queue.At(i)) {
+			break
+		}
+	}
+}
+
+// Clone clones internal contents of q.
+//
+// Calling Clone on running q might be wrong choice since it would block long if q holds many elements.
+// An element being sent through Sink.Write may not be included in returned slice.
+// If Sink.Write failed, the element would be pushed back to the head of q.
+// So any subsequent calls could observe an additional element on head.
+func (q *EventQueue[E]) Clone() []E {
+	q.cond.L.Lock()
+	defer q.cond.L.Unlock()
+	cloned := make([]E, q.queue.Len())
+	for i := 0; i < q.queue.Len(); i++ {
+		cloned[i] = q.queue.At(i)
+	}
+	return cloned
+}
+
+// Clear clears q.
+// It may or may not retain memory allocated for q.
+// Calling Clear on running q might be wrong.
+func (q *EventQueue[E]) Clear() {
+	q.cond.L.Lock()
+	defer q.cond.L.Unlock()
+	q.queue.Clear()
+}
+
 // CancelReserved cancels all jobs reserved via Reserve.
 // CancelReserved only cancels all reservations present at the time CancelReserved is called.
 // q is still valid and usable after this method returns.
