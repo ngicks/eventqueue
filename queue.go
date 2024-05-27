@@ -29,29 +29,36 @@ type Option[E any] func(q *EventQueue[E])
 
 // WithRetryInterval returns Option that sets the retry interval to q.
 // Without this option, q does not retry to Write until another push event occurs.
-func WithRetryInterval[E any](dur time.Duration) Option[E] {
+func WithRetryInterval[E any](retryTimeout time.Duration) Option[E] {
 	return func(q *EventQueue[E]) {
-		q.dur = dur
+		q.retryTimeout = retryTimeout
+	}
+}
+
+func WithReservationTimeout[E any](reservationTimeout time.Duration) Option[E] {
+	return func(q *EventQueue[E]) {
+		q.reservationTimeout = reservationTimeout
 	}
 }
 
 type reservation struct {
 	done   <-chan struct{}
-	cancel context.CancelCauseFunc
+	cancel func()
 }
 
 type EventQueue[E any] struct {
 	queue *deque.Deque[E]
 	sink  Sink[E]
 
-	isRunning     atomic.Bool
-	hasUpdate     chan struct{}
-	reserved      map[int]reservation
-	reservationId int
+	isRunning          atomic.Bool
+	hasUpdate          chan struct{}
+	reserved           map[int]reservation
+	reservationId      int
+	reservationTimeout time.Duration
 
-	cond  *sync.Cond
-	dur   time.Duration
-	clock clockwork.Clock
+	cond         *sync.Cond
+	retryTimeout time.Duration
+	clock        clockwork.Clock
 }
 
 func New[E any](sink Sink[E], opts ...Option[E]) *EventQueue[E] {
@@ -95,7 +102,7 @@ func (q *EventQueue[E]) CancelReserved() {
 	q.cond.L.Lock()
 	defer q.cond.L.Unlock()
 	for _, reservation := range q.reserved {
-		reservation.cancel(ErrClosed)
+		reservation.cancel()
 	}
 }
 
@@ -109,8 +116,17 @@ func (q *EventQueue[E]) CancelReserved() {
 // E returned by fn enters q only and only if it returned nil error.
 func (q *EventQueue[E]) Reserve(fn func(context.Context) (E, error)) {
 	doneCh := make(chan struct{})
-	ctx, cancel := context.WithCancelCause(context.Background())
-
+	var (
+		ctx    context.Context
+		cancel func()
+	)
+	if q.reservationTimeout > 0 {
+		ctx, cancel = context.WithTimeoutCause(context.Background(), q.reservationTimeout, ErrClosed)
+	} else {
+		ctx2, cancel2 := context.WithCancelCause(context.Background())
+		ctx = ctx2
+		cancel = func() { cancel2(ErrClosed) }
+	}
 	q.cond.L.Lock()
 	id := q.reservationId
 	q.reservationId = rotatingAdd(q.reservationId)
@@ -189,14 +205,14 @@ func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 	}
 	defer q.isRunning.Store(false)
 
-	retryTimer := q.clock.NewTimer(30 * 24 * time.Hour) // far time.
+	retryTimer := q.clock.NewTimer(30 * 24 * time.Hour) // far future.
 	_ = retryTimer.Stop()
 
 	var set bool
 	resetTimer := func() {}
-	if q.dur > 0 {
+	if q.retryTimeout > 0 {
 		resetTimer = func() {
-			retryTimer.Reset(q.dur)
+			retryTimer.Reset(q.retryTimeout)
 			set = true
 		}
 	}
