@@ -27,22 +27,6 @@ type Sink[E any] interface {
 	Write(ctx context.Context, event E) error
 }
 
-type Option[E any] func(q *EventQueue[E])
-
-// WithRetryInterval returns Option that sets the retry interval to q.
-// Without this option, q does not retry to Write until another push event occurs.
-func WithRetryInterval[E any](retryTimeout time.Duration) Option[E] {
-	return func(q *EventQueue[E]) {
-		q.retryTimeout = retryTimeout
-	}
-}
-
-func WithReservationTimeout[E any](reservationTimeout time.Duration) Option[E] {
-	return func(q *EventQueue[E]) {
-		q.reservationTimeout = reservationTimeout
-	}
-}
-
 type reservation struct {
 	done   <-chan struct{}
 	cancel func()
@@ -131,6 +115,7 @@ func (q *EventQueue[E]) Clear() {
 	q.cond.L.Lock()
 	defer q.cond.L.Unlock()
 	q.queue.Clear()
+	q.cond.Broadcast()
 }
 
 // CancelReserved cancels all jobs reserved via Reserve.
