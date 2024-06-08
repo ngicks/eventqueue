@@ -17,3 +17,9 @@ func WithReservationTimeout[E any](reservationTimeout time.Duration) Option[E] {
 		q.reservationTimeout = reservationTimeout
 	}
 }
+
+func WithQueue[E any](queue Queue[E]) Option[E] {
+	return func(q *EventQueue[E]) {
+		q.queue = queue
+	}
+}

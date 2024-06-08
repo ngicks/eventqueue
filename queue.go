@@ -27,13 +27,23 @@ type Sink[E any] interface {
 	Write(ctx context.Context, event E) error
 }
 
+type Queue[T any] interface {
+	At(i int) T
+	Clear()
+	Len() int
+	PopBack() T
+	PopFront() T
+	PushBack(elem T)
+	PushFront(elem T)
+}
+
 type reservation struct {
 	done   <-chan struct{}
 	cancel func()
 }
 
 type EventQueue[E any] struct {
-	queue *deque.Deque[E]
+	queue Queue[E]
 	sink  Sink[E]
 
 	isRunning          atomic.Bool
@@ -51,7 +61,6 @@ func New[E any](sink Sink[E], opts ...Option[E]) *EventQueue[E] {
 	q := &EventQueue[E]{
 		cond:      sync.NewCond(&sync.Mutex{}),
 		sink:      sink,
-		queue:     deque.New[E](1 << 4),
 		hasUpdate: make(chan struct{}, 1),
 		reserved:  make(map[int]reservation, 1<<4),
 		clock:     clockwork.NewRealClock(),
@@ -59,6 +68,10 @@ func New[E any](sink Sink[E], opts ...Option[E]) *EventQueue[E] {
 
 	for _, opt := range opts {
 		opt(q)
+	}
+
+	if q.queue == nil {
+		q.queue = deque.New[E](1 << 4)
 	}
 
 	return q
