@@ -1,8 +1,55 @@
 # eventqueue
 
-A generic FIFO event queue.
+A generic event queue. By default it is an FIFO queue.
 
-eventqueue queues up events (tasks) and send them to Sink in FIFO order.
+eventqueue queues up events (tasks) and send them to Sink.
+
+## Custom queueing mechanism
+
+Using `WithQueue` option with a `Queue[T]` implementor, You can swap internal queueing mechanism.
+
+For default (w/o `WithQueue` option), `Deque[T any]`, a thin wrapper of [github.com/gammazero/deque](https://github.com/gammazero/deque), with initial capacity at 2^4 is used.
+
+```go
+func WithQueue[E any](queue Queue[E]) Option[E] {
+	return func(q *EventQueue[E]) {
+		q.queue = queue
+	}
+}
+
+type Queue[T any] interface {
+	Range(fn func(i int, e T) (next bool))
+	Clone() []T
+	Clear()
+	Len() int
+	PopFront() T
+	PushBack(elem T)
+	PushFront(elem T)
+}
+```
+
+We also maintain a priority queue implementor.
+
+```go
+type rankedNum struct {
+	Num  int
+	Rank int
+}
+
+q := New(
+	sink,
+	WithQueue(NewPriorityQueue( // ranked num max heap.
+		nil,
+		func(i, j *rankedNum) bool {
+			if i.Rank != j.Rank {
+				return i.Rank > j.Rank
+			}
+			return i.Num > j.Num
+		},
+		priorityqueue.SliceInterfaceMethods[*rankedNum]{},
+	)),
+) // queued item sorted by its priority.
+```
 
 ## Usage
 

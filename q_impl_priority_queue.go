@@ -9,6 +9,11 @@ import (
 var _ Queue[any] = (*PriorityQueue[any])(nil)
 
 // PriorityQueue implements [Queue].
+//
+// In case elements are pushed back by Sink Write error,
+// PriorityQueue stores those elements into "staged" area
+// instead of the underlying queue.
+// Popping this queue always consumes "staged" elements first, in LIFO order.
 type PriorityQueue[T any] struct {
 	popped []T
 	q      *priorityqueue.Filterable[T]
