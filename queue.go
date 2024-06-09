@@ -47,6 +47,7 @@ type EventQueue[E any] struct {
 	sink  Sink[E]
 
 	isRunning          atomic.Bool
+	writing            bool
 	hasUpdate          chan struct{}
 	reserved           map[int]reservation
 	reservationId      int
@@ -234,6 +235,14 @@ func (q *EventQueue[E]) Drain() {
 	q.cond.L.Unlock()
 }
 
+func (q *EventQueue[E]) WaitUntil(cond func(writing bool, queued, reserved int) bool) {
+	q.cond.L.Lock()
+	for !cond(q.writing, q.queue.Len(), len(q.reserved)) {
+		q.cond.Wait()
+	}
+	q.cond.L.Unlock()
+}
+
 // Run runs q, block until ctx is cancelled.
 func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 	if !q.isRunning.CompareAndSwap(false, true) {
@@ -278,7 +287,18 @@ func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 				break
 			}
 
+			q.cond.L.Lock()
+			q.writing = true
+			q.cond.Broadcast()
+			q.cond.L.Unlock()
+
 			err := q.sink.Write(ctx, event)
+
+			q.cond.L.Lock()
+			q.writing = false
+			q.cond.Broadcast()
+			q.cond.L.Unlock()
+
 			if err != nil {
 				q.cond.L.Lock()
 				q.queue.PushFront(event)
