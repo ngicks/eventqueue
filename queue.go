@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gammazero/deque"
 	"github.com/jonboulle/clockwork"
 )
 
@@ -28,10 +27,10 @@ type Sink[E any] interface {
 }
 
 type Queue[T any] interface {
-	At(i int) T
+	Range(fn func(i int, e T) (next bool))
+	Clone() []T
 	Clear()
 	Len() int
-	PopBack() T
 	PopFront() T
 	PushBack(elem T)
 	PushFront(elem T)
@@ -72,7 +71,7 @@ func New[E any](sink Sink[E], opts ...Option[E]) *EventQueue[E] {
 	}
 
 	if q.queue == nil {
-		q.queue = deque.New[E](1 << 4)
+		q.queue = NewDeque[E](1 << 4)
 	}
 
 	return q
@@ -96,17 +95,15 @@ func (q *EventQueue[E]) Push(e E) {
 }
 
 // Range calls fn sequentially for each element in q. If fn returns false, range stops the iteration.
+// The order of elements always is same as what the Sink would see them.
 func (q *EventQueue[E]) Range(fn func(i int, e E) (next bool)) {
 	q.cond.L.Lock()
 	defer q.cond.L.Unlock()
-	for i := 0; i < q.queue.Len(); i++ {
-		if !fn(i, q.queue.At(i)) {
-			break
-		}
-	}
+	q.queue.Range(fn)
 }
 
 // Clone clones internal contents of q.
+// The order of elements always is same as what the Sink would see them.
 //
 // Calling Clone on running q might be wrong choice since it would block long if q holds many elements.
 // An element being sent through Sink.Write may not be included in returned slice.
@@ -115,11 +112,7 @@ func (q *EventQueue[E]) Range(fn func(i int, e E) (next bool)) {
 func (q *EventQueue[E]) Clone() []E {
 	q.cond.L.Lock()
 	defer q.cond.L.Unlock()
-	cloned := make([]E, q.queue.Len())
-	for i := 0; i < q.queue.Len(); i++ {
-		cloned[i] = q.queue.At(i)
-	}
-	return cloned
+	return q.queue.Clone()
 }
 
 // Clear clears q.
