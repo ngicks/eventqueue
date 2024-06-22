@@ -15,6 +15,7 @@ import (
 	"gotest.tools/v3/assert/cmp"
 )
 
+// TODO: remove this impl, use swappable instead.
 type sink struct {
 	err     error
 	flowing bool

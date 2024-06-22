@@ -46,11 +46,16 @@ type EventQueue[E any] struct {
 	sink  Sink[E]
 
 	isRunning          atomic.Bool
+	stopping           bool
 	writing            bool
 	hasUpdate          chan struct{}
 	reserved           map[int]reservation
 	reservationId      int
 	reservationTimeout time.Duration
+
+	pusher      chan E
+	limitNotice chan struct{}
+	queueSize   int
 
 	cond         *sync.Cond
 	retryTimeout time.Duration
@@ -59,11 +64,14 @@ type EventQueue[E any] struct {
 
 func New[E any](sink Sink[E], opts ...Option[E]) *EventQueue[E] {
 	q := &EventQueue[E]{
-		cond:      sync.NewCond(&sync.Mutex{}),
-		sink:      sink,
-		hasUpdate: make(chan struct{}, 1),
-		reserved:  make(map[int]reservation, 1<<4),
-		clock:     clockwork.NewRealClock(),
+		cond:        sync.NewCond(&sync.Mutex{}),
+		sink:        sink,
+		hasUpdate:   make(chan struct{}, 1),
+		reserved:    make(map[int]reservation, 1<<4),
+		pusher:      make(chan E),
+		limitNotice: make(chan struct{}, 1),
+		queueSize:   -1,
+		clock:       clockwork.NewRealClock(),
 	}
 
 	for _, opt := range opts {
@@ -81,16 +89,50 @@ func (q *EventQueue[E]) IsRunning() bool {
 	return q.isRunning.Load()
 }
 
+func (q *EventQueue[E]) Pusher() chan<- E {
+	return q.pusher
+}
+
 func (q *EventQueue[E]) Push(e E) {
+	q.push(e, true)
+}
+
+func (q *EventQueue[E]) push(e E, block bool) {
 	q.cond.L.Lock()
 	defer q.cond.L.Unlock()
 
+	if block {
+		select {
+		case q.hasUpdate <- struct{}{}:
+		default:
+		} // notice update anyway
+		q.waitQueueRoom(false)
+	}
+
 	q.queue.PushBack(e)
+	if q.queue.Len() >= q.queueSize { // Reservations are unbound. They'll exceeds the limit.
+		select {
+		case q.limitNotice <- struct{}{}:
+		default:
+		}
+	}
 	q.cond.Broadcast() // notify all change.
 
 	select {
 	case q.hasUpdate <- struct{}{}:
 	default:
+	}
+
+}
+
+func (q *EventQueue[E]) waitQueueRoom(unblockOnStopping bool) {
+	if q.queueSize > -1 && q.queue.Len() >= q.queueSize {
+		q.waitUntil(func(stopping, writing bool, queued, reserved int) bool {
+			if unblockOnStopping && stopping {
+				return true
+			}
+			return queued < q.queueSize
+		})
 	}
 }
 
@@ -170,7 +212,7 @@ func (q *EventQueue[E]) Reserve(fn func(context.Context) (E, error)) {
 	go func() {
 		e, err := fn(ctx)
 		if err == nil {
-			q.Push(e)
+			q.push(e, false)
 		}
 		close(doneCh)
 		q.cond.L.Lock()
@@ -230,10 +272,16 @@ func (q *EventQueue[E]) Drain() {
 
 func (q *EventQueue[E]) WaitUntil(cond func(writing bool, queued, reserved int) bool) {
 	q.cond.L.Lock()
-	for !cond(q.writing, q.queue.Len(), len(q.reserved)) {
+	defer q.cond.L.Unlock()
+	q.waitUntil(func(stopping, writing bool, queued, reserved int) bool {
+		return cond(writing, queued, reserved)
+	})
+}
+
+func (q *EventQueue[E]) waitUntil(cond func(stopping, writing bool, queued, reserved int) bool) {
+	for !cond(q.stopping, q.writing, q.queue.Len(), len(q.reserved)) {
 		q.cond.Wait()
 	}
-	q.cond.L.Unlock()
 }
 
 // Run runs q.
@@ -242,7 +290,16 @@ func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 	if !q.isRunning.CompareAndSwap(false, true) {
 		return 0, ErrAlreadyRunning
 	}
-	defer q.isRunning.Store(false)
+	defer func() {
+		// TODO: add announcedChange(fn (q *EventQueue[E])) method,
+		// instead of writing Lock and Broadcast then Unlock sequence everywhere?
+		q.cond.L.Lock()
+		q.stopping = false
+		q.cond.Broadcast()
+		q.cond.L.Unlock()
+
+		q.isRunning.Store(false)
+	}()
 
 	retryTimer := q.clock.NewTimer(30 * 24 * time.Hour) // far future.
 	_ = retryTimer.Stop()
@@ -314,17 +371,63 @@ func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 		}
 	}
 
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		q.pusherLoop(ctx)
+	}()
+	defer wg.Wait()
+
 	for {
 		select {
 		case <-ctx.Done():
 			stopTimer()
+
+			q.cond.L.Lock()
+			q.stopping = true
+			q.cond.Broadcast()
+			q.cond.L.Unlock()
+
 			len, _ := q.Len()
+
 			return len, nil
 		case <-retryTimer.Chan():
 			set = false
 			writeAll()
 		case <-q.hasUpdate:
 			writeAll()
+		}
+	}
+}
+
+func (q *EventQueue[E]) pusherLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-q.limitNotice:
+			q.cond.L.Lock()
+			q.waitQueueRoom(true)
+			q.cond.L.Unlock()
+		default:
+			select {
+			case <-ctx.Done():
+				return
+			case <-q.limitNotice:
+				q.cond.L.Lock()
+				q.waitQueueRoom(true)
+				q.cond.L.Unlock()
+			case e, ok := <-q.pusher:
+				if !ok {
+					panic("EventQueue[E]: Pusher is closed")
+				}
+				q.cond.L.Lock()
+				q.queue.PushBack(e)
+				q.cond.Broadcast()
+				q.waitQueueRoom(true)
+				q.cond.L.Unlock()
+			}
 		}
 	}
 }
