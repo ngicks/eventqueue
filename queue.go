@@ -296,13 +296,13 @@ func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 			if err != nil {
 				q.cond.L.Lock()
 				q.queue.PushFront(event)
+				q.cond.Broadcast()
 				q.cond.L.Unlock()
 
 				resetTimer()
 				break
 			}
 		}
-		q.cond.Broadcast()
 	}
 
 	len, _ := q.Len()
@@ -333,6 +333,7 @@ func (q *EventQueue[E]) pop() (event E, popped bool) {
 	q.cond.L.Lock()
 	defer q.cond.L.Unlock()
 	if q.queue.Len() > 0 {
+		q.cond.Broadcast()
 		return q.queue.PopFront(), true
 	} else {
 		var zero E
