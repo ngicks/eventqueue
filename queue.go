@@ -141,7 +141,7 @@ func (q *EventQueue[E]) CancelReserved() {
 // fn will be called in a newly created goroutine,
 // and it must return E.
 // It also must respect ctx cancellation whose cause will be ErrClosed in case it has been cancelled.
-// Cancellation would only happen if CloseReserved was called.
+// Cancellation would only happen if CancelReserved was called.
 //
 // E returned by fn enters q only and only if it returned nil error.
 func (q *EventQueue[E]) Reserve(fn func(context.Context) (E, error)) {
@@ -236,7 +236,8 @@ func (q *EventQueue[E]) WaitUntil(cond func(writing bool, queued, reserved int) 
 	q.cond.L.Unlock()
 }
 
-// Run runs q, block until ctx is cancelled.
+// Run runs q.
+// It blocks until ctx is cancelled.
 func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 	if !q.isRunning.CompareAndSwap(false, true) {
 		return 0, ErrAlreadyRunning
