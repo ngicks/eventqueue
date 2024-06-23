@@ -52,12 +52,14 @@ func TestEventQueue_Clone_Range(t *testing.T) {
 
 type swappable[T any] struct {
 	sync.Mutex
+	t       *testing.T
 	blocker chan struct{}
 	sink    Sink[T]
 }
 
-func newSwappable[T any]() *swappable[T] {
+func newSwappable[T any](t *testing.T) *swappable[T] {
 	return &swappable[T]{
+		t:       t,
 		blocker: make(chan struct{}),
 	}
 }
@@ -75,6 +77,7 @@ func (s *swappable[T]) makeBlocker() {
 }
 
 func (s *swappable[T]) Write(ctx context.Context, e T) error {
+	s.t.Logf("Write is called with %#v", e)
 	s.Lock()
 	defer s.Unlock()
 	<-s.blocker
@@ -108,7 +111,7 @@ func (s *sliceSink[T]) Write(ctx context.Context, e T) error {
 }
 
 func testEventQueue_Clone_Range[T any](t *testing.T, opts []Option[T], firstPush T, elements []T, expected []T) {
-	sink := newSwappable[T]()
+	sink := newSwappable[T](t)
 	_ = sink.swap(&errSink[T]{Err: errors.New("foo")})
 
 	q := New[T](sink, append([]Option[T]{WithRetryInterval[T](time.Second)}, opts...)...)
@@ -116,15 +119,15 @@ func testEventQueue_Clone_Range[T any](t *testing.T, opts []Option[T], firstPush
 	q.clock = fakeClock
 
 	ctx, cancel := context.WithCancel(context.Background())
-	timingGroup := timing.NewGroup(ctx, false)
+	g := timing.NewGroup(ctx, false)
 
-	timingGroup.Go(func(ctx context.Context) error {
+	g.Go(func(ctx context.Context) error {
 		_, _ = q.Run(ctx)
 		return nil
 	})
 	defer func() {
 		cancel()
-		_ = timingGroup.Wait()
+		_ = g.Wait()
 	}()
 
 	waiter := timing.CreateWaiterCh(func() {
@@ -156,7 +159,17 @@ func testEventQueue_Clone_Range[T any](t *testing.T, opts []Option[T], firstPush
 
 	<-waiter
 
+	sink.Lock()
 	sink.makeBlocker()
+	sink.Unlock()
+
+	q.WaitUntil(func(writing bool, queued, reserved int) bool {
+		t.Logf("writing = %t, queued = %d, reserved = %d", writing, queued, reserved)
+		if writing { // I dunno why but is flaky without this.
+			sink.waitWrite()
+		}
+		return !writing
+	})
 
 	ranged := make([]T, 1+len(elements))
 	q.Range(func(i int, e T) (next bool) {
@@ -165,16 +178,20 @@ func testEventQueue_Clone_Range[T any](t *testing.T, opts []Option[T], firstPush
 	})
 
 	cloned := q.Clone()
-	_ = sink.swap(&sliceSink[T]{})
+	channelSink := NewChannelSink[T](0)
+	_ = sink.swap(channelSink)
 	sink.closeBlocker()
-
 	fakeClock.Advance(2 * time.Second)
 
+	var received []T
+	for {
+		received = append(received, <-channelSink.Outlet())
+		if len(received) == len(expected) {
+			break
+		}
+	}
+
 	q.Drain()
-
-	slicer := sink.swap(&errSink[T]{}).(*sliceSink[T])
-
-	received := slicer.Received
 
 	assert.DeepEqual(t, expected, received)
 	assert.DeepEqual(t, expected, ranged)

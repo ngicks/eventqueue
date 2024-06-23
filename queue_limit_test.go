@@ -13,7 +13,7 @@ import (
 )
 
 func TestEventQueue_size_limit(t *testing.T) {
-	sink := newSwappable[int]()
+	sink := newSwappable[int](t)
 	_ = sink.swap(&errSink[int]{Err: errors.New("foo")})
 
 	q := New(sink, WithQueueSize[int](10))
