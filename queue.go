@@ -328,16 +328,14 @@ func (q *EventQueue[E]) waitUntil(ctx context.Context, bufSize int, recheck bool
 		delete(q.stateChangeNotifier, nextIdx)
 	}()
 
-L:
 	for {
 		select {
 		case <-ctx.Done():
 			q.mu.Lock()
 			return ctx.Err()
 		case state := <-c:
-			// fmt.Printf("state: %#v\n", state)
 			if !cond(state.stopping, state.writing, state.queued, state.reserved) {
-				continue L
+				continue
 			}
 			q.mu.Lock()
 			if !recheck {
@@ -347,7 +345,7 @@ L:
 			state = newQState(q)
 			if !cond(state.stopping, state.writing, state.queued, state.reserved) {
 				q.mu.Unlock() // unlock, continue waiting.
-				continue L
+				continue
 			}
 			// locked
 			return nil
