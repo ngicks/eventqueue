@@ -19,6 +19,12 @@ func main() {
 		q.Push(i)
 	}
 
+	go func() {
+		for i := range 5 {
+			q.Pusher() <- i + 50
+		}
+	}()
+
 	// q also can Reserve happening of event after fn returns.
 	// If fn returns with nil error, returned E enters queue.
 	q.Reserve(func(ctx context.Context) (int, error) {
@@ -51,7 +57,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 11; i++ {
+		for i := 0; i < 16; i++ {
 			fmt.Printf("received: %d\n", <-sink.Outlet())
 			/*
 				received: 0
@@ -64,6 +70,11 @@ func main() {
 				received: 7
 				received: 8
 				received: 9
+				received: 50
+				received: 51
+				received: 52
+				received: 53
+				received: 54
 				received: 999
 			*/
 		}

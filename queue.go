@@ -27,12 +27,28 @@ type Sink[E any] interface {
 }
 
 type Queue[T any] interface {
+	// Range invokes fn with index i and element e for as many times as queued elements.
+	// i is 0 to number Len() returns.
+	// fn will see e as if PopFront is called sequentially.
 	Range(fn func(i int, e T) (next bool))
+	// Clone returns cloned queued elements as []T.
+	// The elements are ordered as if PopFront was called Len() times and appended to a slice.
 	Clone() []T
+	// Clear clears queued elements.
+	// Clear may or may not release excess memory.
 	Clear()
+	// Len returns length of queued elements.
 	Len() int
+	// PopFront pops an element from queue.
+	//
+	// PopFront calls must first return PushFront-ed elements in LIFO order if any,
+	// then PushBack-ed elements in the implementation specific order.
 	PopFront() T
+	// PushBack pushes an element to queue.
 	PushBack(elem T)
+	// PushFront pushes an element to queue.
+	// PushFront is called only if Sink.Write returned an error.
+	// Next PopFront calls must return PushFront-ed elements first in LIFO order.
 	PushFront(elem T)
 }
 

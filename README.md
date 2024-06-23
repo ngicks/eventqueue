@@ -67,8 +67,10 @@ type Sink[E any] interface {
 }
 ```
 
-eventqueue can be `Push`-ed arbitrary number as long as the system has enough memory space.
-It then tries to `Write` to `Sink` in FIFO order.
+eventqueue can be `Push`-ed or sent through `Pusher` channel, arbitrary number of elements as long as the system has enough memory space.
+Or you can limit queue size by `WithQueueSize`.
+
+It then tries to `Write` to `Sink` in queue's specific order (by default FIFO.)
 
 eventqueue also can `Reserve` happening of event after `fn func(context.Context) (E, error)`,
 passed `fn` will be called in a new goroutine and once `fn` returns with nil error, returned event from `fn` enters eventqueue.
@@ -83,6 +85,12 @@ func main() {
 	for i := 0; i < 10; i++ {
 		q.Push(i)
 	}
+
+	go func() {
+		for i := range 5 {
+			q.Pusher() <- i + 50
+		}
+	}()
 
 	// q also can Reserve happening of event after fn returns.
 	// If fn returns with nil error, returned E enters queue.
@@ -129,6 +137,11 @@ func main() {
 				received: 7
 				received: 8
 				received: 9
+				received: 50
+				received: 51
+				received: 52
+				received: 53
+				received: 54
 				received: 999
 			*/
 		}

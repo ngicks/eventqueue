@@ -6,18 +6,32 @@ type Option[E any] func(q *EventQueue[E])
 
 // WithRetryInterval returns Option that sets the retry interval to q.
 // Without this option, q does not retry to Write until another push event occurs.
+//
+// The duration less than or equals to 0 disables retry.
+//
+// The default is 0.
 func WithRetryInterval[E any](retryTimeout time.Duration) Option[E] {
 	return func(q *EventQueue[E]) {
 		q.retryTimeout = retryTimeout
 	}
 }
 
+// WithReservationTimeout sets timeout duration for tasks reserved by Reserve method.
+// The context.Context passed to fn will be canceled after this duration has passed.
+//
+// The duration less than or equals to 0 disables timeout.
+//
+// The default is 0.
 func WithReservationTimeout[E any](reservationTimeout time.Duration) Option[E] {
 	return func(q *EventQueue[E]) {
 		q.reservationTimeout = reservationTimeout
 	}
 }
 
+// WithQueue options swap an internal queueing mechanism to an arbitrary implementation.
+//
+// Setting nil falls back to the default.
+// The default is Deque[T].
 func WithQueue[E any](queue Queue[E]) Option[E] {
 	return func(q *EventQueue[E]) {
 		q.queue = queue
