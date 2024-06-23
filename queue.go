@@ -297,7 +297,7 @@ func (q *EventQueue[E]) Drain() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	_ = q.waitUntil(context.Background(), 100, false, func(stopping, writing bool, queued, reserved int) bool {
-		return queued == 0 && reserved == 0
+		return !writing && queued == 0 && reserved == 0
 	})
 }
 
