@@ -67,16 +67,32 @@ func TestEventQueue_size_limit(t *testing.T) {
 	}
 
 	sink.waitWrite()
-	_ = sink.swap(&sliceSink[int]{})
+	var received []int
+	chanSink := NewChannelSink[int](0)
+	_ = sink.swap(chanSink)
+
+	g.Go(func(ctx context.Context) error {
+		q.WaitUntil(func(writing bool, queued, reserved int) bool {
+			t.Logf("writing = %t, queued = %d, reserved = %d", writing, queued, reserved)
+			return ctx.Err() != nil
+		})
+		return nil
+	})
 
 	// Write error stops q.
-	// The main cause of Write is assumed a context cancellation.
+	// The main cause of Write error is assumed a context cancellation.
 	// Therefore automatic retry is considered unnatural.
+	q.WaitUntil(func(writing bool, queued, reserved int) bool {
+		t.Logf("writing = %t, queued = %d, reserved = %d", writing, queued, reserved)
+		return !writing && queued == 12 // 2 is blocked on.
+	})
 
 	// Pushing it signals update anyway
 	pushUnblocked2 := timing.CreateWaiterCh(func() { q.Push(14) })
 
+	t.Logf("let single write unblocked and succeed")
 	sink.waitWrite() // let single Write succeed.
+	received = append(received, <-chanSink.Outlet())
 
 	select {
 	case <-time.NewTimer(time.Millisecond).C:
@@ -88,11 +104,14 @@ func TestEventQueue_size_limit(t *testing.T) {
 		t.Fatal("sending on Pusher channel unblocked; ignoring queue size")
 	}
 
-	sink.waitWrite()
+	sink.waitWrite() // synchronized at Write is called, keep it blocked on Write.
+	received = append(received, <-chanSink.Outlet())
 
 	select {
 	case <-time.NewTimer(time.Millisecond).C:
-		t.Fatal("timed out; expected single push attempt unblocks")
+		time.Sleep(time.Millisecond)
+		queued, _ := q.Len()
+		t.Fatalf("timed out; expected single push attempt unblocks: queued = %d", queued)
 	case <-pushUnblocked:
 		pushUnblocked = nil
 	case <-pushUnblocked2:
@@ -101,13 +120,19 @@ func TestEventQueue_size_limit(t *testing.T) {
 		pusherChanUnblocked = nil
 	}
 
+	sink.waitWrite()
+	q.WaitUntil(func(writing bool, queued, reserved int) bool {
+		t.Logf("writing = %t, queued = %d, reserved = %d", writing, queued, reserved)
+		return writing && queued == 10
+	})
+
 	queued, reserved = q.Len()
 	assert.Equal(t, queued, 10)
 	assert.Equal(t, reserved, 0)
 
 	pushUnblocked3 := timing.CreateWaiterCh(func() { q.Push(15) })
-
 	pusherChanUnblocked2 := timing.CreateWaiterCh(func() { q.Pusher() <- 16 })
+
 	select {
 	case <-time.NewTimer(time.Millisecond).C:
 	case <-pushUnblocked:
@@ -126,7 +151,27 @@ func TestEventQueue_size_limit(t *testing.T) {
 	assert.Equal(t, queued, 10)
 	assert.Equal(t, reserved, 0)
 
-	sink.closeBlocker()
+	g.Go(func(ctx context.Context) error {
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case e := <-chanSink.Outlet():
+				t.Logf("received: %d", e)
+				received = append(received, e)
+			}
+		}
+	})
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case sink.blocker <- struct{}{}:
+			}
+		}
+	}()
 
 	for range 4 { // one channel already closed
 		select {
@@ -159,17 +204,19 @@ func TestEventQueue_size_limit(t *testing.T) {
 		),
 	)
 
-	q.Drain()
+	q.WaitUntil(func(writing bool, queued, reserved int) bool {
+		t.Logf("writing = %t, queued = %d, reserved =  %d", writing, queued, reserved)
+		return writing == false && queued == 0 && reserved == 0
+	})
 
 	cancel()
 	assert.NilError(t, g.Wait())
 
-	elements := sink.swap(&errSink[int]{nil}).(*sliceSink[int]).Received
 	assert.Assert(
 		t,
-		contains0toN(elements, len(elements)),
+		contains0toN(received, len(received)),
 		"assumed to be slices that contains 0 to %d, but is %#v",
-		len(elements), elements,
+		len(received), received,
 	)
 }
 

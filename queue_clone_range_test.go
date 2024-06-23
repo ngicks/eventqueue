@@ -70,6 +70,10 @@ func (s *swappable[T]) closeBlocker() {
 	close(s.blocker)
 }
 
+func (s *swappable[T]) makeBlocker() {
+	s.blocker = make(chan struct{})
+}
+
 func (s *swappable[T]) Write(ctx context.Context, e T) error {
 	s.Lock()
 	defer s.Unlock()
@@ -123,22 +127,36 @@ func testEventQueue_Clone_Range[T any](t *testing.T, opts []Option[T], firstPush
 		_ = timingGroup.Wait()
 	}()
 
+	waiter := timing.CreateWaiterCh(func() {
+		// wait until q pushes back element to queue.
+		q.WaitUntil(func(writing bool, queued, reserved int) bool {
+			t.Logf("waiting: writing = %t, queued = %d, reserved = %d", writing, queued, reserved)
+			return writing == false && queued == 1
+		})
+	})
+
 	q.Push(firstPush)
 	sink.waitWrite()
 
-	// wait until q pushes back element to queue.
-	q.WaitUntil(func(writing bool, queued, reserved int) bool {
-		return writing == false && queued == 1
+	<-waiter
+
+	waiter = timing.CreateWaiterCh(func() {
+		// wait until q pushes back element to queue.
+		q.WaitUntil(func(writing bool, queued, reserved int) bool {
+			t.Logf("waiting: cond = %t, writing = %t, queued = %d, reserved = %d", writing == false && queued == 1+len(elements), writing, queued, reserved)
+			return writing == false && queued == 1+len(elements)
+		})
 	})
+
+	sink.closeBlocker()
 
 	for _, e := range elements {
 		q.Push(e)
-		sink.waitWrite()
 	}
 
-	q.WaitUntil(func(writing bool, queued, reserved int) bool {
-		return writing == false && queued == 1+len(elements)
-	})
+	<-waiter
+
+	sink.makeBlocker()
 
 	ranged := make([]T, 1+len(elements))
 	q.Range(func(i int, e T) (next bool) {

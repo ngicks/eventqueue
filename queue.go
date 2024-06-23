@@ -41,6 +41,19 @@ type reservation struct {
 	cancel func()
 }
 
+type qState struct {
+	stopping bool
+	writing  bool
+	queued   int
+	reserved int
+}
+
+func newQState[T any](q *EventQueue[T]) qState {
+	return qState{
+		q.stopping, q.writing, q.queue.Len(), len(q.reserved),
+	}
+}
+
 type EventQueue[E any] struct {
 	queue Queue[E]
 	sink  Sink[E]
@@ -54,24 +67,27 @@ type EventQueue[E any] struct {
 	reservationTimeout time.Duration
 
 	pusher      chan E
-	limitNotice chan struct{}
+	limitNotice chan struct{} // notice q that
 	queueSize   int
 
-	cond         *sync.Cond
-	retryTimeout time.Duration
-	clock        clockwork.Clock
+	mu                    sync.Mutex
+	drainNotifier         chan struct{}
+	stateChangeNotifier   map[int]chan qState
+	stateChangeNotifierId int
+	retryTimeout          time.Duration
+	clock                 clockwork.Clock
 }
 
 func New[E any](sink Sink[E], opts ...Option[E]) *EventQueue[E] {
 	q := &EventQueue[E]{
-		cond:        sync.NewCond(&sync.Mutex{}),
-		sink:        sink,
-		hasUpdate:   make(chan struct{}, 1),
-		reserved:    make(map[int]reservation, 1<<4),
-		pusher:      make(chan E),
-		limitNotice: make(chan struct{}, 1),
-		queueSize:   -1,
-		clock:       clockwork.NewRealClock(),
+		drainNotifier:       make(chan struct{}),
+		stateChangeNotifier: make(map[int]chan qState),
+		sink:                sink,
+		hasUpdate:           make(chan struct{}, 1),
+		reserved:            make(map[int]reservation, 1<<4),
+		pusher:              make(chan E),
+		limitNotice:         make(chan struct{}, 1),
+		clock:               clockwork.NewRealClock(),
 	}
 
 	for _, opt := range opts {
@@ -83,6 +99,23 @@ func New[E any](sink Sink[E], opts ...Option[E]) *EventQueue[E] {
 	}
 
 	return q
+}
+
+func (q *EventQueue[E]) announcedChangeLocked(f func(q *EventQueue[E])) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.announcedChange(f)
+}
+
+func (q *EventQueue[E]) announcedChange(f func(q *EventQueue[E])) {
+	f(q)
+	state := newQState(q)
+	for _, c := range q.stateChangeNotifier {
+		select {
+		case c <- state:
+		default:
+		}
+	}
 }
 
 func (q *EventQueue[E]) IsRunning() bool {
@@ -98,25 +131,26 @@ func (q *EventQueue[E]) Push(e E) {
 }
 
 func (q *EventQueue[E]) push(e E, block bool) {
-	q.cond.L.Lock()
-	defer q.cond.L.Unlock()
+	q.mu.Lock()
+	defer q.mu.Unlock()
 
 	if block {
 		select {
 		case q.hasUpdate <- struct{}{}:
 		default:
 		} // notice update anyway
-		q.waitQueueRoom(false)
+		_ = q.waitQueueRoom(context.Background(), false)
 	}
 
-	q.queue.PushBack(e)
-	if q.queue.Len() >= q.queueSize { // Reservations are unbound. They'll exceeds the limit.
+	q.announcedChange(func(q *EventQueue[E]) {
+		q.queue.PushBack(e)
+	})
+	if q.queueSize > 0 && q.queue.Len() >= q.queueSize { // Reservations are unbound. They'll exceeds the limit.
 		select {
 		case q.limitNotice <- struct{}{}:
 		default:
 		}
 	}
-	q.cond.Broadcast() // notify all change.
 
 	select {
 	case q.hasUpdate <- struct{}{}:
@@ -125,22 +159,23 @@ func (q *EventQueue[E]) push(e E, block bool) {
 
 }
 
-func (q *EventQueue[E]) waitQueueRoom(unblockOnStopping bool) {
-	if q.queueSize > -1 && q.queue.Len() >= q.queueSize {
-		q.waitUntil(func(stopping, writing bool, queued, reserved int) bool {
+func (q *EventQueue[E]) waitQueueRoom(ctx context.Context, unblockOnStopping bool) error {
+	if q.queueSize > 0 && q.queue.Len() >= q.queueSize {
+		return q.waitUntil(ctx, 10, true, func(stopping, writing bool, queued, reserved int) bool {
 			if unblockOnStopping && stopping {
 				return true
 			}
 			return queued < q.queueSize
 		})
 	}
+	return nil
 }
 
 // Range calls fn sequentially for each element in q. If fn returns false, range stops the iteration.
 // The order of elements always is same as what the Sink would see them.
 func (q *EventQueue[E]) Range(fn func(i int, e E) (next bool)) {
-	q.cond.L.Lock()
-	defer q.cond.L.Unlock()
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	q.queue.Range(fn)
 }
 
@@ -152,8 +187,8 @@ func (q *EventQueue[E]) Range(fn func(i int, e E) (next bool)) {
 // If Sink.Write failed, the element would be pushed back to the head of q.
 // So any subsequent calls could observe an additional element on head.
 func (q *EventQueue[E]) Clone() []E {
-	q.cond.L.Lock()
-	defer q.cond.L.Unlock()
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	return q.queue.Clone()
 }
 
@@ -161,18 +196,17 @@ func (q *EventQueue[E]) Clone() []E {
 // It may or may not retain memory allocated for q.
 // Calling Clear on running q might be wrong.
 func (q *EventQueue[E]) Clear() {
-	q.cond.L.Lock()
-	defer q.cond.L.Unlock()
-	q.queue.Clear()
-	q.cond.Broadcast()
+	q.announcedChangeLocked(func(q *EventQueue[E]) {
+		q.queue.Clear()
+	})
 }
 
 // CancelReserved cancels all jobs reserved via Reserve.
 // CancelReserved only cancels all reservations present at the time CancelReserved is called.
 // q is still valid and usable after this method returns.
 func (q *EventQueue[E]) CancelReserved() {
-	q.cond.L.Lock()
-	defer q.cond.L.Unlock()
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	for _, reservation := range q.reserved {
 		reservation.cancel()
 	}
@@ -199,15 +233,16 @@ func (q *EventQueue[E]) Reserve(fn func(context.Context) (E, error)) {
 		ctx = ctx2
 		cancel = func() { cancel2(ErrClosed) }
 	}
-	q.cond.L.Lock()
+	q.mu.Lock()
 	id := q.reservationId
 	q.reservationId = rotatingAdd(q.reservationId)
 	// id could overwrite existing entry.
 	// Not likely but possible.
 	// TODO: detect overwrite and panic if any?
-	q.reserved[id] = reservation{doneCh, cancel}
-	q.cond.Broadcast() // notify all change of reserved
-	q.cond.L.Unlock()
+	q.announcedChange(func(q *EventQueue[E]) {
+		q.reserved[id] = reservation{doneCh, cancel}
+	})
+	q.mu.Unlock()
 
 	go func() {
 		e, err := fn(ctx)
@@ -215,10 +250,9 @@ func (q *EventQueue[E]) Reserve(fn func(context.Context) (E, error)) {
 			q.push(e, false)
 		}
 		close(doneCh)
-		q.cond.L.Lock()
-		delete(q.reserved, id) // notify all change of reserved
-		q.cond.Broadcast()
-		q.cond.L.Unlock()
+		q.announcedChangeLocked(func(q *EventQueue[E]) {
+			delete(q.reserved, id)
+		})
 	}()
 }
 
@@ -229,7 +263,7 @@ func (q *EventQueue[E]) Reserve(fn func(context.Context) (E, error)) {
 // which was present at the moment WaitReserved is called,
 // are done.
 func (q *EventQueue[E]) WaitReserved() <-chan struct{} {
-	q.cond.L.Lock()
+	q.mu.Lock()
 
 	eventCh := make(chan struct{})
 	var wg sync.WaitGroup
@@ -242,7 +276,7 @@ func (q *EventQueue[E]) WaitReserved() <-chan struct{} {
 		}(reservation.done)
 	}
 
-	q.cond.L.Unlock()
+	q.mu.Unlock()
 
 	go func() {
 		wg.Wait()
@@ -253,34 +287,71 @@ func (q *EventQueue[E]) WaitReserved() <-chan struct{} {
 }
 
 func (q *EventQueue[E]) Len() (queued, reserved int) {
-	q.cond.L.Lock()
-	defer q.cond.L.Unlock()
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	return q.queue.Len(), len(q.reserved)
 }
 
 // Drain blocks until queue and reserved events become 0.
 func (q *EventQueue[E]) Drain() {
-	q.cond.L.Lock()
-	for {
-		if q.queue.Len() == 0 && len(q.reserved) == 0 {
-			break
-		}
-		q.cond.Wait()
-	}
-	q.cond.L.Unlock()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	_ = q.waitUntil(context.Background(), 100, false, func(stopping, writing bool, queued, reserved int) bool {
+		return queued == 0 && reserved == 0
+	})
 }
 
 func (q *EventQueue[E]) WaitUntil(cond func(writing bool, queued, reserved int) bool) {
-	q.cond.L.Lock()
-	defer q.cond.L.Unlock()
-	q.waitUntil(func(stopping, writing bool, queued, reserved int) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	_ = q.waitUntil(context.Background(), 100, false, func(stopping, writing bool, queued, reserved int) bool {
 		return cond(writing, queued, reserved)
 	})
 }
 
-func (q *EventQueue[E]) waitUntil(cond func(stopping, writing bool, queued, reserved int) bool) {
-	for !cond(q.stopping, q.writing, q.queue.Len(), len(q.reserved)) {
-		q.cond.Wait()
+func (q *EventQueue[E]) waitUntil(ctx context.Context, bufSize int, recheck bool, cond func(stopping, writing bool, queued, reserved int) bool) error {
+	state := newQState(q)
+	if cond(state.stopping, state.writing, state.queued, state.reserved) {
+		// stay locked, unlocking is caller's responsibility.
+		return nil
+	}
+
+	c := make(chan qState, bufSize)
+	nextIdx := q.stateChangeNotifierId
+	q.stateChangeNotifierId = rotatingAdd(q.stateChangeNotifierId)
+	q.stateChangeNotifier[nextIdx] = c
+
+	q.mu.Unlock() // unlock, wait for events to come.
+
+	defer func() {
+		// at the return it must be locked.
+		delete(q.stateChangeNotifier, nextIdx)
+	}()
+
+L:
+	for {
+		select {
+		case <-ctx.Done():
+			q.mu.Lock()
+			return ctx.Err()
+		case state := <-c:
+			// fmt.Printf("state: %#v\n", state)
+			if !cond(state.stopping, state.writing, state.queued, state.reserved) {
+				continue L
+			}
+			q.mu.Lock()
+			if !recheck {
+				// locked
+				return nil
+			}
+			state = newQState(q)
+			if !cond(state.stopping, state.writing, state.queued, state.reserved) {
+				q.mu.Unlock() // unlock, continue waiting.
+				continue L
+			}
+			// locked
+			return nil
+		}
 	}
 }
 
@@ -291,13 +362,9 @@ func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 		return 0, ErrAlreadyRunning
 	}
 	defer func() {
-		// TODO: add announcedChange(fn (q *EventQueue[E])) method,
-		// instead of writing Lock and Broadcast then Unlock sequence everywhere?
-		q.cond.L.Lock()
-		q.stopping = false
-		q.cond.Broadcast()
-		q.cond.L.Unlock()
-
+		q.announcedChangeLocked(func(q *EventQueue[E]) {
+			q.stopping = false
+		})
 		q.isRunning.Store(false)
 	}()
 
@@ -338,24 +405,20 @@ func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 				break
 			}
 
-			q.cond.L.Lock()
-			q.writing = true
-			q.cond.Broadcast()
-			q.cond.L.Unlock()
+			q.announcedChangeLocked(func(q *EventQueue[E]) {
+				q.writing = true
+			})
 
 			err := q.sink.Write(ctx, event)
 
-			q.cond.L.Lock()
-			q.writing = false
-			q.cond.Broadcast()
-			q.cond.L.Unlock()
+			q.announcedChangeLocked(func(q *EventQueue[E]) {
+				q.writing = false
+				if err != nil {
+					q.queue.PushFront(event)
+				}
+			})
 
 			if err != nil {
-				q.cond.L.Lock()
-				q.queue.PushFront(event)
-				q.cond.Broadcast()
-				q.cond.L.Unlock()
-
 				resetTimer()
 				break
 			}
@@ -377,17 +440,15 @@ func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 		defer wg.Done()
 		q.pusherLoop(ctx)
 	}()
-	defer wg.Wait()
 
 	for {
 		select {
 		case <-ctx.Done():
 			stopTimer()
 
-			q.cond.L.Lock()
-			q.stopping = true
-			q.cond.Broadcast()
-			q.cond.L.Unlock()
+			q.announcedChangeLocked(func(q *EventQueue[E]) {
+				q.stopping = true
+			})
 
 			len, _ := q.Len()
 
@@ -407,36 +468,36 @@ func (q *EventQueue[E]) pusherLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-q.limitNotice:
-			q.cond.L.Lock()
-			q.waitQueueRoom(true)
-			q.cond.L.Unlock()
+			q.mu.Lock()
+			_ = q.waitQueueRoom(ctx, true)
+			q.mu.Unlock()
 		default:
 			select {
 			case <-ctx.Done():
 				return
 			case <-q.limitNotice:
-				q.cond.L.Lock()
-				q.waitQueueRoom(true)
-				q.cond.L.Unlock()
+				q.mu.Lock()
+				_ = q.waitQueueRoom(ctx, true)
+				q.mu.Unlock()
 			case e, ok := <-q.pusher:
 				if !ok {
 					panic("EventQueue[E]: Pusher is closed")
 				}
-				q.cond.L.Lock()
-				q.queue.PushBack(e)
-				q.cond.Broadcast()
-				q.waitQueueRoom(true)
-				q.cond.L.Unlock()
+				q.mu.Lock()
+				q.announcedChange(func(q *EventQueue[E]) {
+					q.queue.PushBack(e)
+				})
+				_ = q.waitQueueRoom(ctx, true)
+				q.mu.Unlock()
 			}
 		}
 	}
 }
 
 func (q *EventQueue[E]) pop() (event E, popped bool) {
-	q.cond.L.Lock()
-	defer q.cond.L.Unlock()
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	if q.queue.Len() > 0 {
-		q.cond.Broadcast()
 		return q.queue.PopFront(), true
 	} else {
 		var zero E

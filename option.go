@@ -26,8 +26,9 @@ func WithQueue[E any](queue Queue[E]) Option[E] {
 
 // WithQueueSize sets soft limit on queue size.
 //
-// If queueSize is greater than or equals to 0,
+// If queueSize is greater than 0,
 // Push method and sending on Pusher channel blocks after the queue size exceeds this limit.
+// The queueSize which is less than or equals to 0 places no limit on queued element size.
 //
 // This is does not place a strict limit;
 // the limit is totally ignored by 2 ways. Pushes after reserved task completion and Pushing back an element failed by a Write error.
