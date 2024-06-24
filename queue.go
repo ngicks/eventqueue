@@ -236,7 +236,8 @@ func (q *EventQueue[E]) CancelReserved() {
 // fn will be called in a newly created goroutine,
 // and it must return E.
 // It also must respect ctx cancellation whose cause will be ErrClosed in case it has been cancelled.
-// Cancellation would only happen if CancelReserved was called.
+// Cancellations would happen if CancelReserved was called,
+// or WithReservationTimeout was set and fn reached the dead line.
 //
 // E returned by fn enters q only and only if it returned nil error.
 //
