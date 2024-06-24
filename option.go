@@ -28,9 +28,10 @@ func WithReservationTimeout[E any](reservationTimeout time.Duration) Option[E] {
 	}
 }
 
-// WithQueue options swap an internal queueing mechanism to an arbitrary implementation.
+// WithQueue option swaps an internal queueing mechanism to an arbitrary implementation.
 //
 // Setting nil falls back to the default.
+//
 // The default is Deque[T].
 func WithQueue[E any](queue Queue[E]) Option[E] {
 	return func(q *EventQueue[E]) {
@@ -44,7 +45,7 @@ func WithQueue[E any](queue Queue[E]) Option[E] {
 // Push method and sending on Pusher channel blocks after the queue size exceeds this limit.
 // The queueSize which is less than or equals to 0 places no limit on queued element size.
 //
-// This is does not place a strict limit;
+// This does not place a strict limit;
 // the limit is totally ignored by 2 ways. Pushes after reserved task completion and Pushing back an element failed by a Write error.
 // The Pusher channel may take an additional single element than limit.
 //

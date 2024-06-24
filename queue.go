@@ -70,6 +70,12 @@ func newQState[T any](q *EventQueue[T]) qState {
 	}
 }
 
+// EventQueue[E] queues up events E and write them into Sink serially.
+// Events are pushed by Push method, through a channel returned by Pusher method,
+// or even Reserve an occurrence of event.
+//
+// The zero value for EventQueue[E] is invalid.
+// You must create an initialized object by New.
 type EventQueue[E any] struct {
 	queue Queue[E]
 	sink  Sink[E]
@@ -138,10 +144,19 @@ func (q *EventQueue[E]) IsRunning() bool {
 	return q.isRunning.Load()
 }
 
+// Pusher returns the pusher channel
+// through which you can push E into q.
+//
+// q blocks until q starts running and
+// there's room in q if queueSize is set.
 func (q *EventQueue[E]) Pusher() chan<- E {
 	return q.pusher
 }
 
+// Push pushes elements to q.
+// If q is running, update is notified immediately.
+// If queueSize is set and is greater than 0,
+// Push may block until there's room in q.
 func (q *EventQueue[E]) Push(e E) {
 	q.push(e, true)
 }
@@ -173,18 +188,6 @@ func (q *EventQueue[E]) push(e E, block bool) {
 	default:
 	}
 
-}
-
-func (q *EventQueue[E]) waitQueueRoom(ctx context.Context, unblockOnStopping bool) error {
-	if q.queueSize > 0 && q.queue.Len() >= q.queueSize {
-		return q.waitUntil(ctx, 10, true, func(stopping, writing bool, queued, reserved int) bool {
-			if unblockOnStopping && stopping {
-				return true
-			}
-			return queued < q.queueSize
-		})
-	}
-	return nil
 }
 
 // Range calls fn sequentially for each element in q. If fn returns false, range stops the iteration.
@@ -236,6 +239,8 @@ func (q *EventQueue[E]) CancelReserved() {
 // Cancellation would only happen if CancelReserved was called.
 //
 // E returned by fn enters q only and only if it returned nil error.
+//
+// Reserved tasks ignore limit set by the WithQueueSize option.
 func (q *EventQueue[E]) Reserve(fn func(context.Context) (E, error)) {
 	doneCh := make(chan struct{})
 	var (
@@ -302,6 +307,9 @@ func (q *EventQueue[E]) WaitReserved() <-chan struct{} {
 	return eventCh
 }
 
+// Len returns length of queued and reserved elements.
+//
+// Len may return queued that exceeds limit placed by WithQueueSize.
 func (q *EventQueue[E]) Len() (queued, reserved int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -317,6 +325,7 @@ func (q *EventQueue[E]) Drain() {
 	})
 }
 
+// WaitUntil blocks the calling goroutine until cond is met.
 func (q *EventQueue[E]) WaitUntil(cond func(writing bool, queued, reserved int) bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -325,6 +334,27 @@ func (q *EventQueue[E]) WaitUntil(cond func(writing bool, queued, reserved int) 
 	})
 }
 
+// waitQueueRoom blocks until there's room in queue.
+// must be called while lock is held.
+func (q *EventQueue[E]) waitQueueRoom(ctx context.Context, unblockOnStopping bool) error {
+	if q.queueSize > 0 && q.queue.Len() >= q.queueSize {
+		return q.waitUntil(ctx, 10, true, func(stopping, writing bool, queued, reserved int) bool {
+			if unblockOnStopping && stopping {
+				return true
+			}
+			return queued < q.queueSize
+		})
+	}
+	return nil
+}
+
+// waitUntil waits until cond is met.
+// must be called while lock is held.
+//
+// While waiting for events are notified,
+// waitUntil releases the lock.
+// After delivered state meets the cond, it acquire lock again and returns.
+// If recheck is true, state is fetched and re-checked again with locked.
 func (q *EventQueue[E]) waitUntil(ctx context.Context, bufSize int, recheck bool, cond func(stopping, writing bool, queued, reserved int) bool) error {
 	state := newQState(q)
 	if cond(state.stopping, state.writing, state.queued, state.reserved) {
@@ -499,6 +529,9 @@ func (q *EventQueue[E]) pusherLoop(ctx context.Context) {
 				}
 				q.mu.Lock()
 				q.announcedChange(func(q *EventQueue[E]) {
+					// We need to push it immediately, without checking whether queue has enough room for it.
+					// We've taken away users' data. That cannot be stay in the mid-air long time.
+					// Push it and queue impl might save it correctly.
 					q.queue.PushBack(e)
 				})
 				_ = q.waitQueueRoom(ctx, true)
