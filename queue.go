@@ -444,14 +444,19 @@ func (q *EventQueue[E]) Run(ctx context.Context) (remaining int, err error) {
 	writeAll := func() {
 		stopTimer()
 		for {
-			event, popped := q.pop()
+			var (
+				event  E
+				popped bool
+			)
+			q.announcedChangeLocked(func(q *EventQueue[E]) {
+				event, popped = q.pop()
+				if popped {
+					q.writing = true
+				}
+			})
 			if !popped {
 				break
 			}
-
-			q.announcedChangeLocked(func(q *EventQueue[E]) {
-				q.writing = true
-			})
 
 			err := q.sink.Write(ctx, event)
 
@@ -541,9 +546,8 @@ func (q *EventQueue[E]) pusherLoop(ctx context.Context) {
 	}
 }
 
+// pop is not synced.
 func (q *EventQueue[E]) pop() (event E, popped bool) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
 	if q.queue.Len() > 0 {
 		return q.queue.PopFront(), true
 	} else {
